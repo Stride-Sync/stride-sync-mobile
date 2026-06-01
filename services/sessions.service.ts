@@ -43,7 +43,7 @@ export const sessionsService = {
       if (cached) return cached;
     }
 
-    const { data } = await api.get('/sessions');
+    const { data } = await api.get('/sessions/history');
     cacheService.set(cacheKey, data, 15 * 60 * 1000); // 15 min
     return data;
   },
