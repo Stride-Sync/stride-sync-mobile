@@ -72,7 +72,7 @@ export default function ProfileScreen() {
   }
 
   // Recarrega ao focar, mas o cache evita o ActivityIndicator intrusivo
-  useFocusEffect(useCallback(() => { loadData(); }, [profile]));
+  useFocusEffect(useCallback(() => { loadData(); }, []));
 
   function handleLogout() {
     Alert.alert(

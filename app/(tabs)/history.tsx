@@ -46,7 +46,7 @@ export default function HistoryScreen() {
     else setLoading(true);
     setError(false);
     try {
-      const data = await sessionsService.getHistory();
+      const data = await sessionsService.getHistory(showRefresh);
       setSessions(data);
     } catch (e) {
       console.warn('[History] Erro:', e);
