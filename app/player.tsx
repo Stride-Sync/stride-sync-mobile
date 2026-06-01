@@ -8,6 +8,7 @@ import {
   Animated,
   Alert,
   PanResponder,
+  Modal,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -17,12 +18,14 @@ import {
   X,
   MapPinOff,
   Clock,
+  Map as MapIcon,
 } from 'lucide-react-native';
 import Svg, { Circle } from 'react-native-svg';
 import * as Location from 'expo-location';
 import * as Haptics from 'expo-haptics';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BlurView } from 'expo-blur';
+import MapView, { Polyline } from 'react-native-maps';
 
 import { Colors, Spacing } from '../constants/Theme';
 import { sessionsService } from '../services/sessions.service';
@@ -34,6 +37,7 @@ import { formatClock } from '../utils/time';
 import { GeoKalmanFilter } from '../utils/KalmanFilter';
 import { MovementDetector } from '../utils/MovementDetector';
 import { haversineKm } from '../utils/geo';
+import { CustomAlert } from '../components/CustomAlert';
 
 
 const { width } = Dimensions.get('window');
@@ -83,6 +87,14 @@ export default function PlayerScreen() {
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [finishing, setFinishing] = useState(false);
   const [paceDisplay, setPaceDisplay] = useState('--:--');
+  const [routeCoords, setRouteCoords] = useState<{latitude: number, longitude: number}[]>([]);
+  const [showMap, setShowMap] = useState(false);
+  
+  const [alertState, setAlertState] = useState<{visible: boolean, title: string, message: string, buttons: any[]}>({
+    visible: false, title: '', message: '', buttons: []
+  });
+  
+  const hideAlert = () => setAlertState(prev => ({ ...prev, visible: false }));
 
   const lastPosition = useRef<{ lat: number; lng: number; timestamp: number } | null>(null);
   const { bpm, pulseAnim } = useRealisticBPM(154, isPlaying);
@@ -164,16 +176,24 @@ export default function PlayerScreen() {
 
       sub = await Location.watchPositionAsync(
         {
-          accuracy: Location.Accuracy.High,
+          accuracy: Location.Accuracy.BestForNavigation,
           timeInterval: 2000,
-          distanceInterval: 1, // Deixa o Kalman tratar a suavização
+          distanceInterval: 1,
         },
         (location: Location.LocationObject) => {
           if (!isPlayingRef.current || !location) return;
           const { latitude, longitude, accuracy } = location.coords;
           const timestamp = location.timestamp;
           
-          // 1. FILTRO DE ACURÁCIA (REJEITA SINAL RUIM)
+          // Captura a primeira posição imediatamente para o mapa não ficar vazio
+          if (!lastPosition.current) {
+            lastPosition.current = { lat: latitude, lng: longitude, timestamp };
+            setRouteCoords([{ latitude, longitude }]);
+            setGpsAccuracy(Math.round(accuracy || 0));
+            return;
+          }
+
+          // 1. FILTRO DE ACURÁCIA (REJEITA SINAL RUIM PARA PONTOS SEGUINTES)
           if (accuracy && accuracy > 20) {
             setGpsAccuracy(Math.round(accuracy));
             return;
@@ -204,23 +224,36 @@ export default function PlayerScreen() {
             if (speedMs >= 0.8 && speedMs <= 10) {
               setDistanceKm((prev) => prev + d);
               lastPosition.current = { lat: filtered.latitude, lng: filtered.longitude, timestamp };
+              setRouteCoords(prev => [...prev, { latitude: filtered.latitude, longitude: filtered.longitude }]);
             }
-          } else {
-            lastPosition.current = { lat: filtered.latitude, lng: filtered.longitude, timestamp };
           }
         }
       );
+
+      // Inicia Foreground Service para garantir que o rastreamento não seja morto pelo SO (Otimização de Bateria)
+      await Location.startLocationUpdatesAsync('BACKGROUND_LOCATION_TASK', {
+        accuracy: Location.Accuracy.Balanced,
+        timeInterval: 10000, // Menos requisições no background para poupar bateria
+        distanceInterval: 5,
+        foregroundService: {
+          notificationTitle: "StrideSync",
+          notificationBody: "Trackeando sua corrida...",
+          notificationColor: "#BF5AF2",
+        },
+      });
     }
 
     if (isPlaying) {
       startTracking();
     } else {
       sub?.remove();
+      Location.stopLocationUpdatesAsync('BACKGROUND_LOCATION_TASK').catch(() => {});
       movement.stop();
       setGpsActive(false);
     }
     return () => { 
       sub?.remove(); 
+      Location.stopLocationUpdatesAsync('BACKGROUND_LOCATION_TASK').catch(() => {});
       movement.stop();
     };
   }, [isPlaying]);
@@ -296,46 +329,60 @@ export default function PlayerScreen() {
   }, [isPlaying, sessionId, bpm, paceDisplay]);
 
   async function handleFinish() {
-    Alert.alert('Finalizar Treino', 'Deseja encerrar a sessão agora?', [
-      { text: 'Continuar', style: 'cancel' },
-      { text: 'Finalizar', style: 'destructive', onPress: async () => {
-        setIsPlaying(false);
-        setFinishing(true);
-        try {
-          if (sessionId) {
-            await telemetryQueue.syncQueue(Number(sessionId));
-            await sessionsService.finishSession(Number(sessionId));
-            
-            // Invalida caches afetados por um novo treino (Isolado)
+    setAlertState({
+      visible: true,
+      title: 'Finalizar Treino',
+      message: 'Deseja encerrar a sessão agora e salvar o progresso?',
+      buttons: [
+        { text: 'Continuar', style: 'cancel', onPress: hideAlert },
+        { text: 'Finalizar', style: 'default', onPress: async () => {
+            hideAlert();
+            setIsPlaying(false);
+            setFinishing(true);
             try {
-              await Promise.all([
-                cacheService.invalidate('stats:week'),
-                cacheService.invalidate('stats:month'),
-                cacheService.invalidate('stats:all'),
-                cacheService.invalidate('sessions:history'),
-              ]);
-            } catch (e) {
-              console.warn('[Player] Falha ao invalidar cache após treino:', e);
+              if (sessionId) {
+                await telemetryQueue.syncQueue(Number(sessionId));
+                await sessionsService.finishSession(Number(sessionId));
+                
+                try {
+                  await Promise.all([
+                    cacheService.invalidate('stats:week'),
+                    cacheService.invalidate('stats:month'),
+                    cacheService.invalidate('stats:all'),
+                    cacheService.invalidate('sessions:history'),
+                  ]);
+                } catch (e) {
+                  console.warn('[Player] Falha ao invalidar cache após treino:', e);
+                }
+              }
+              router.replace({ pathname: '/summary', params: { sessionId: sessionId ?? '', elapsed: String(elapsed) } });
+            } catch {
+              setAlertState({
+                visible: true, title: 'Ops!', message: 'Falha ao salvar. Tentaremos novamente depois.',
+                buttons: [{ text: 'OK', onPress: hideAlert }]
+              });
+              setFinishing(false);
             }
-          }
-          router.replace({ pathname: '/summary', params: { sessionId: sessionId ?? '', elapsed: String(elapsed) } });
-        } catch {
-          Alert.alert('Erro', 'Falha ao salvar. Tentaremos mais tarde.');
-          setFinishing(false);
-        }
-      }},
-    ]);
+        }}
+      ]
+    });
   }
 
   async function handleAbort() {
-    Alert.alert('Abandonar Treino', 'Seu progresso será salvo até aqui.', [
-      { text: 'Continuar', style: 'cancel' },
-      { text: 'Abandonar', style: 'destructive', onPress: async () => {
-        setIsPlaying(false);
-        try { if (sessionId) await sessionsService.abortSession(Number(sessionId)); }
-        finally { router.back(); }
-      }},
-    ]);
+    setAlertState({
+      visible: true,
+      title: 'Abandonar Treino',
+      message: 'Seu progresso será salvo até aqui. Deseja mesmo parar?',
+      buttons: [
+        { text: 'Continuar', style: 'cancel', onPress: hideAlert },
+        { text: 'Abandonar', style: 'destructive', onPress: async () => {
+            hideAlert();
+            setIsPlaying(false);
+            try { if (sessionId) await sessionsService.abortSession(Number(sessionId)); }
+            finally { router.back(); }
+        }}
+      ]
+    });
   }
 
 
@@ -414,6 +461,68 @@ export default function PlayerScreen() {
           </View>
         </View>
 
+        <TouchableOpacity style={styles.mapToggleBtn} onPress={() => setShowMap(true)} activeOpacity={0.7}>
+          <MapIcon size={20} color={Colors.accent} />
+          <Text style={styles.mapToggleText}>VER TRAJETO</Text>
+        </TouchableOpacity>
+
+        <Modal visible={showMap} animationType="slide" transparent={true} onRequestClose={() => setShowMap(false)}>
+          <BlurView intensity={90} tint="dark" style={StyleSheet.absoluteFill} />
+          <SafeAreaView style={styles.modalSafe}>
+            <View style={styles.mapModalContainer}>
+              <View style={styles.mapModalHeader}>
+                <Text style={styles.mapModalTitle}>SEU TRAJETO</Text>
+                <TouchableOpacity onPress={() => setShowMap(false)} style={styles.mapModalClose}>
+                  <X size={24} color={Colors.textPrimary} />
+                </TouchableOpacity>
+              </View>
+              
+              <View style={styles.mapModalBody}>
+                {routeCoords.length > 0 ? (
+                  <MapView
+                    style={{ flex: 1 }}
+                    showsUserLocation={true}
+                    showsMyLocationButton={true}
+                    userInterfaceStyle="dark"
+                    customMapStyle={[
+                      { elementType: "geometry", stylers: [{ color: "#141414" }] },
+                      { elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+                      { elementType: "labels.text.fill", stylers: [{ color: "#71717a" }] },
+                      { elementType: "labels.text.stroke", stylers: [{ color: "#0a0a0a" }] },
+                      { featureType: "poi", elementType: "geometry", stylers: [{ color: "#1c1c1c" }] },
+                      { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#181818" }] },
+                      { featureType: "road", elementType: "geometry.fill", stylers: [{ color: "#2c2c2c" }] },
+                      { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#373737" }] },
+                      { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#3c3c3c" }] },
+                      { featureType: "water", elementType: "geometry", stylers: [{ color: "#000000" }] }
+                    ]}
+                    initialRegion={{
+                      latitude: routeCoords[0].latitude,
+                      longitude: routeCoords[0].longitude,
+                      latitudeDelta: 0.01,
+                      longitudeDelta: 0.01,
+                    }}
+                    region={{
+                      latitude: routeCoords[routeCoords.length - 1].latitude,
+                      longitude: routeCoords[routeCoords.length - 1].longitude,
+                      latitudeDelta: 0.005,
+                      longitudeDelta: 0.005,
+                    }}
+                  >
+                    <Polyline coordinates={routeCoords} strokeColor={Colors.accent} strokeWidth={6} />
+                  </MapView>
+                ) : (
+                  <View style={styles.mapFallbackLarge}>
+                     <MapPinOff size={48} color={Colors.textMuted} />
+                     <Text style={{ color: Colors.textMuted, marginTop: 16, fontSize: 16, fontWeight: '600' }}>Aguardando sinal de GPS...</Text>
+                     <Text style={{ color: Colors.textMuted, marginTop: 8, fontSize: 13, textAlign: 'center', opacity: 0.7 }}>O trajeto aparecerá aqui assim que você começar a se mover.</Text>
+                  </View>
+                )}
+              </View>
+            </View>
+          </SafeAreaView>
+        </Modal>
+
         <Animated.View style={[styles.statsRow, { opacity: statsOpacity }]}>
           {metricsData.map((m, i) => ({ ...m, id: i })).filter((m) => m.id !== circleMetric).map((m) => (
             <View key={m.id} style={styles.statItem}>
@@ -435,6 +544,14 @@ export default function PlayerScreen() {
           </TouchableOpacity>
         </View>
       </View>
+      
+      <CustomAlert 
+        visible={alertState.visible}
+        title={alertState.title}
+        message={alertState.message}
+        buttons={alertState.buttons}
+        onClose={hideAlert}
+      />
     </SafeAreaView>
   );
 }
@@ -454,6 +571,15 @@ const styles = StyleSheet.create({
   bpmLabel: { fontSize: 13, fontWeight: '800', color: Colors.textMuted, letterSpacing: 2, marginBottom: 4 },
   bpmValue: { fontSize: 80, fontWeight: '800', color: Colors.textPrimary, lineHeight: 88 },
   bpmUnit: { fontSize: 20, fontWeight: '800', color: Colors.accent, letterSpacing: 2, marginTop: 2 },
+  mapToggleBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: 'rgba(255,255,255,0.08)', paddingVertical: 12, borderRadius: 100, marginBottom: 24, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
+  mapToggleText: { fontSize: 12, fontWeight: '800', color: Colors.textPrimary, letterSpacing: 1 },
+  modalSafe: { flex: 1 },
+  mapModalContainer: { flex: 1, margin: Spacing.lg, backgroundColor: Colors.bgCardSolid, borderRadius: 24, overflow: 'hidden', borderWidth: 1, borderColor: Colors.glassBorder },
+  mapModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 20, borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)' },
+  mapModalTitle: { fontSize: 16, fontWeight: '800', color: Colors.textPrimary, letterSpacing: 1 },
+  mapModalClose: { padding: 4, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 100 },
+  mapModalBody: { flex: 1, backgroundColor: '#000' },
+  mapFallbackLarge: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
   statsRow: { flexDirection: 'row', gap: 24, marginBottom: 32 },
   statItem: { flex: 1, gap: 6 },
   statHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
