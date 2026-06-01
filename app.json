@@ -21,6 +21,11 @@
         "foregroundImage": "./assets/images/brand-adaptive.png",
         "backgroundColor": "#000000"
       },
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyDC2w3Pho8-bY_CC3C9qbIw_LgueG9GykU"
+        }
+      },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
