@@ -84,7 +84,17 @@ export default function QuizScreen() {
         height_cm:     parseInt(data.height, 10) || 175,
         weekly_days:   data.weekly_days,
       };
-      await api.post('/profile', payload);
+      try {
+        await api.post('/profile', payload);
+      } catch (postErr: any) {
+        if (postErr.response?.status === 409) {
+          // Perfil já existe — atualiza em vez de falhar
+          await api.put('/profile', payload);
+        } else {
+          throw postErr;
+        }
+      }
+
       try {
         await cacheService.invalidate('profile');
       } catch (e) {
@@ -94,13 +104,22 @@ export default function QuizScreen() {
       // Tudo certo — vai para a home com perfil salvo
       router.replace('/(tabs)/home');
     } catch (err: any) {
-      const msg = err.response?.data?.message;
-      if (err.response?.status === 409) {
-        // Perfil já existe — apenas redireciona
-        router.replace('/(tabs)/home');
-        return;
+      const responseData = err.response?.data;
+      let msg = 'Erro ao salvar o seu perfil. Verifique a internet e tente novamente.';
+
+      if (responseData) {
+        let rawMsg = '';
+        if (typeof responseData.message === 'string') {
+          rawMsg = responseData.message;
+        } else if (Array.isArray(responseData.message)) {
+          rawMsg = responseData.message[0];
+        } else if (responseData.error) {
+          rawMsg = responseData.error;
+        }
+        msg = rawMsg || msg;
       }
-      Alert.alert('Erro', Array.isArray(msg) ? msg[0] : (msg || 'Erro ao salvar perfil.'));
+      
+      Alert.alert('Ops!', msg);
     } finally {
       setLoading(false);
     }

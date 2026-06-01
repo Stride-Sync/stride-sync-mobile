@@ -34,8 +34,29 @@ export default function LoginScreen() {
       console.log('[Login] Sucesso:', result.user.name);
       router.replace('/(tabs)/home');
     } catch (error: any) {
-      const msg = error.response?.data?.message || 'Erro ao fazer login. Verifique suas credenciais.';
-      Alert.alert('Erro', msg);
+      const responseData = error.response?.data;
+      let msg = 'Erro ao fazer login. Verifique sua conexão ou tente novamente.';
+
+      if (responseData) {
+        let rawMsg = '';
+        if (typeof responseData.message === 'string') {
+          rawMsg = responseData.message;
+        } else if (Array.isArray(responseData.message)) {
+          rawMsg = responseData.message[0];
+        } else if (responseData.error) {
+          rawMsg = responseData.error;
+        }
+
+        if (rawMsg.includes('Invalid credentials') || rawMsg.includes('password') || rawMsg.includes('email')) {
+          msg = 'E-mail ou senha incorretos. Tente novamente!';
+        } else if (rawMsg.includes('not found') || rawMsg.includes('user')) {
+          msg = 'Usuário não encontrado. Que tal criar uma conta?';
+        } else {
+          msg = rawMsg || msg;
+        }
+      }
+      
+      Alert.alert('Ops!', msg);
     } finally {
       setLoading(false);
     }

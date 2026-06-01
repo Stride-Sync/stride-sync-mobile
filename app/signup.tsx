@@ -53,25 +53,32 @@ export default function SignUpScreen() {
       // Vai direto para o quiz
       router.replace('/quiz');
     } catch (error: any) {
-      console.error('[SignUp] Erro:', error.response?.data || error.message);
+      console.log('[SignUp] Erro:', error.response?.data || error.message);
       
       const responseData = error.response?.data;
       let msg = 'Não foi possível criar sua conta. Verifique sua conexão ou tente novamente.';
 
-      // Extração robusta de mensagem do NestJS
       if (responseData) {
+        let rawMsg = '';
         if (typeof responseData.message === 'string') {
-          msg = responseData.message;
+          rawMsg = responseData.message;
         } else if (Array.isArray(responseData.message)) {
-          msg = responseData.message[0];
+          rawMsg = responseData.message[0];
         } else if (responseData.error) {
-          msg = responseData.error;
+          rawMsg = responseData.error;
         }
-      } else if (error.message) {
-        msg = error.message;
+
+        // Traduções amigáveis
+        if (rawMsg.includes('Email already registered') || rawMsg.includes('email')) {
+          msg = 'Este e-mail já está cadastrado. Que tal tentar fazer login?';
+        } else if (rawMsg.includes('Username already taken') || rawMsg.includes('username')) {
+          msg = 'Este nome de usuário já está em uso. Escolha outro bem criativo!';
+        } else {
+          msg = rawMsg || msg;
+        }
       }
       
-      Alert.alert('Falha no Cadastro', msg);
+      Alert.alert('Ops!', msg);
     } finally {
       setLoading(false);
     }
